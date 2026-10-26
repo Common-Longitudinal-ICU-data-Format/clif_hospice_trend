@@ -858,6 +858,32 @@ validation_specs = list(
   ))
 
 
+## optional demographic columns (2026.10.26, Sunnybrook) ------------------------
+# Some sites (Sunnybrook, and Canadian sites generally) do not collect race or
+# ethnicity. The columns are no longer hard requirements: when either is absent
+# from the patient table it is added as all missing, every downstream recode
+# then files those patients under "Other/Unknown" (race_eth, race_report) and
+# "Other" (nhw_group), and 04 drops the race term from the models when it does
+# not vary (see the 26.10.26 note there). A QI flag records which columns were
+# absent so the coordinating center can see it in the site log.
+pt_cols_present = names(data_list[["patient"]])
+absent_demo = setdiff(c("race_category", "ethnicity_category"), pt_cols_present)
+if ("race_category" %in% absent_demo)
+  data_list[["patient"]] = dplyr::mutate(data_list[["patient"]], race_category = NA_character_)
+if ("ethnicity_category" %in% absent_demo)
+  data_list[["patient"]] = dplyr::mutate(data_list[["patient"]], ethnicity_category = NA_character_)
+if (length(absent_demo)) {
+  qi_flag(
+    "Race or ethnicity not collected at this site",
+    sprintf(paste0(
+      "patient table has no %s column. Added as all missing: Table 1 reports these\n",
+      "patients as Other/Unknown, and the Aim 2 models run without a race/ethnicity\n",
+      "term (it is constant). Results remain valid for pooling; race adjustment for\n",
+      "this site happens only through the pooled coordinating center model."),
+      paste(absent_demo, collapse = " or ")))
+}
+rm(pt_cols_present, absent_demo)
+
 ## run validation --------------------------------------------------------------
 
 validate_all_tables(data_list, validation_specs)

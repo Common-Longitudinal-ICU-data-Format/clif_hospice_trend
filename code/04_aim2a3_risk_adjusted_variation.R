@@ -92,7 +92,26 @@
 #     - clinical course outputs now carry course_window_hours + course_flag_provenance
 #     - coefficient CSVs carry control_sampled, control_fraction, n_reference_used
 
-# Last updated 26.10.20 (Emory, first site with ONE pandemic era; data begin
+# Last updated 26.10.26 (Sunnybrook, first site with NO race or ethnicity
+# data): race_eth was hard releveled to "White non-Hispanic", which stops the
+# stage when that level is absent, and a race term with a single level is
+# constant and cannot enter a model. Same treatment as the single era fix
+# below, version 04_v261026:
+#   (a) the race_eth reference is "White non-Hispanic" when present (all
+#       current sites, unchanged), otherwise the most frequent level.
+#   (b) when race_eth has fewer than 2 levels in the analytic sample (no race
+#       or ethnicity collected, so everyone is Other/Unknown) the term is left
+#       out of base_rhs, and therefore out of every primary, clinical course,
+#       multinomial and fallback model. Hospital effects at such a site are
+#       not race adjusted locally; the pooled coordinating center model
+#       carries race adjustment from the sites that have it.
+#   (c) the standard population is not filtered by race at such a site (its
+#       rows would otherwise all be dropped as out of vocabulary).
+#   run_config records race_levels_observed, race_reference and
+#   race_term_in_model. 00_setup adds missing race/ethnicity columns as all
+#   missing so stages 01 to 05 run at these sites.
+#
+# Previous update 26.10.20 (Emory, first site with ONE pandemic era; data begin
 # October 2022, so every admission is Post-pandemic): the era factor was
 # hard releveled to "Pre-pandemic", which stopped the stage with "'ref' must
 # be an existing level". Three changes, version 04_v261020:
@@ -454,7 +473,7 @@ run_config = rbind(run_config, data.table(
                        error = function(e) "absent"),
               as.character(utils::packageVersion("data.table")))))
 
-run_config[, `:=`(site = site_lowercase, script_version = "04_v261020")]
+run_config[, `:=`(site = site_lowercase, script_version = "04_v261026")]
 fwrite(run_config, shareable_path(
   paste0("aim2a3_run_config_", site_lowercase, "_", today, ".csv")))
 message(sprintf("Run configuration saved (subsampling %s | clinical course %s | era %s | multinomial %s).",
@@ -1076,6 +1095,9 @@ apply_std_transform = function(raw) {
   }
   # coerce categoricals to the SITE's factor levels; out-of-vocab -> NA -> dropped
   d[, dx_category     := factor(as.character(dx_category),     levels = std_transform$dx_levels)]
+  # 2026.10.26: at a site with one race level (race not collected) the term is
+  # not in the model; keep every standard row rather than filtering to it
+  if (length(std_transform$race_levels) == 1L) d[, race_eth := std_transform$race_levels]
   d[, race_eth        := factor(as.character(race_eth),        levels = std_transform$race_levels)]
   if (!"sex_female" %in% names(d) && "sex_category" %in% names(d))
     d[, sex_female := fifelse(tolower(trimws(sex_category)) == "female", "Female", "Not female")]
@@ -1521,7 +1543,23 @@ rm(n_sf_split)
 
 # ensure factor levels
 model_base[, sex_female := factor(sex_female)]
-model_base[, race_eth := relevel(factor(race_eth), ref = "White non-Hispanic")]
+# FIXED 2026.10.26 (Sunnybrook): the reference is "White non-Hispanic" when
+# present, otherwise the most frequent level; a single level site (race not
+# collected) keeps the column but the term leaves the model (base_rhs below).
+race_seen      = model_base[, .N, by = race_eth][order(-N)]
+race_reference = if ("White non-Hispanic" %in% race_seen$race_eth) "White non-Hispanic" else race_seen$race_eth[1]
+model_base[, race_eth := relevel(factor(race_eth), ref = race_reference)]
+race_in_model  = nlevels(model_base$race_eth) >= 2L
+message(sprintf("  race_eth levels observed: %s | reference: %s%s",
+                paste(levels(model_base$race_eth), collapse = ", "), race_reference,
+                if (race_in_model) "" else " -> race/ethnicity not collected: race term NOT in the model"))
+run_config = rbind(run_config, data.table(
+  setting = c("race_levels_observed", "race_reference", "race_term_in_model"),
+  value   = c(paste(levels(model_base$race_eth), collapse = "; "), race_reference,
+              toupper(format(race_in_model))),
+  site           = site_lowercase,
+  script_version = run_config$script_version[1]), use.names = TRUE, fill = TRUE)
+rm(race_seen)
 # diagnosis-category reference = most frequent body system present in the model
 # data. Robust to the CCSR scheme (and any future regrouping) — avoids hardcoding
 # a level like "Other" that may not exist and would crash relevel().
@@ -1702,7 +1740,9 @@ extra_base = c(
 )
 
 base_rhs = paste(
-  c("age_centered", "sex_female", "race_eth", "dx_category",
+  c("age_centered", "sex_female",
+    if (race_in_model) "race_eth",            # 2026.10.26: constant where race is not collected
+    "dx_category",
     "elix_centered",
     if (apache2_available) c("apache2_centered", "apache2_missing"),
     extra_base,
